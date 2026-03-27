@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>小汽车动画：减速缓行 + 加速冲刺</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+
+        body {
+            min-height: 100vh;
+            background: linear-gradient(145deg, #1a472a 0%, #0e2a1a 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Segoe UI', Roboto, 'Microsoft YaHei', sans-serif;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .stage {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            cursor: pointer;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(255,255,200,0.08) 2%, transparent 2.5%),
+                radial-gradient(circle at 85% 65%, rgba(255,220,150,0.1) 1.5%, transparent 2%);
+            background-size: 45px 45px, 60px 60px;
+        }
+
+        .stage::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            background: repeating-linear-gradient(
+                45deg,
+                rgba(255, 215, 140, 0.15) 0px,
+                rgba(255, 215, 140, 0.15) 2px,
+                transparent 2px,
+                transparent 12px
+            );
+            z-index: 1;
+        }
+
+        .marker {
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            background: radial-gradient(circle, #ffd966, #b87c00);
+            border-radius: 50%;
+            box-shadow: 0 0 12px rgba(255,200,0,0.7);
+            z-index: 2;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        .start-marker {
+            top: 0;
+            left: 0;
+        }
+        .end-marker {
+            bottom: 0;
+            right: 0;
+        }
+
+        .car {
+            position: absolute;
+            will-change: transform, width, height, left, top;
+            filter: drop-shadow(0 8px 12px rgba(0,0,0,0.25));
+            transition: filter 0.2s;
+            z-index: 100;
+            pointer-events: none;
+        }
+        
+        .car img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: contain;
+            pointer-events: none;
+            filter: drop-shadow(0 2px 3px rgba(0,0,0,0.2));
+        }
+
+        .info-panel {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(8px);
+            padding: 8px 18px;
+            border-radius: 40px;
+            color: #f0f0e0;
+            font-size: 14px;
+            font-weight: 500;
+            font-family: monospace;
+            letter-spacing: 1px;
+            z-index: 200;
+            border-left: 3px solid #ffaa33;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        
+        .info-panel span {
+            color: #ffcc66;
+            font-weight: bold;
+        }
+
+        @media (max-width: 600px) {
+            .info-panel { font-size: 10px; bottom: 10px; right: 10px; }
+        }
+    </style>
+</head>
+<body>
+<div class="stage" id="stage">
+    <div class="marker start-marker"></div>
+    <div class="marker end-marker"></div>
+    <div id="car" class="car"></div>
+</div>
+<div class="info-panel">
+    🚗 减速缓行 → 停留2s → 加速冲刺 &nbsp;|&nbsp; 
+    尺寸: <span id="sizeHint">小</span>
+</div>
+
+<script>
+    (function(){
+        // 新图片URL
+        const CAR_URL = "https://ts1.tc.mm.bing.net/th/id/R-C.199f248b1f1989b92f1473b978aa5ac5?rik=1VC8W7KQZpoowA&riu=http%3a%2f%2fexp-picture.cdn.bcebos.com%2f560be432939c2cf7196d60ae452c5b1b1fde127b.jpg%3fx-bce-process%3dimage%252Fcrop%252Cx_0%252Cy_0%252Cw_602%252Ch_368%252Fformat%252Cf_auto%252Fquality%252Cq_80&ehk=7%2bD9RHiRNB4vqNK%2bz4uXuCWRzIFtcStC%2bcSG6ZC12%2bQ%3d&risl=&pid=ImgRaw&r=0";
+        
+        // 动画时间配置 (ms)
+        const DURATION_DECEL = 2000;   // 左上角 → 中央 减速阶段
+        const PAUSE_TIME = 2000;       // 停留2秒
+        const DURATION_ACCEL = 2000;   // 中央 → 右下角 加速阶段
+        
+        // 尺寸范围 (像素)
+        const MIN_WIDTH = 70;
+        const MAX_WIDTH = 210;
+        
+        // 背景抠图阈值 (根据图片背景微调，新图片背景可能不同，取40较通用)
+        const BG_REMOVE_THRESHOLD = 42;
+        
+        const stage = document.getElementById('stage');
+        const carContainer = document.getElementById('car');
+        const sizeHintSpan = document.getElementById('sizeHint');
+        
+        let animFrameId = null;
+        let animStartTime = null;
+        let isAnimating = false;
+        
+        let carAspect = 1.2;          // 初始估算比例，加载后更新
+        let startCenter = { x: 0, y: 0 };
+        let midCenter = { x: 0, y: 0 };
+        let endCenter = { x: 0, y: 0 };
+        
+        let curWidth = MIN_WIDTH;
+        let curHeight = MIN_WIDTH / carAspect;
+        
+        let viewWidth = window.innerWidth;
+        let viewHeight = window.innerHeight;
+        
+        let carImgElement = null;
+        
+        // 缓动函数
+        function easeOutCubic(t) {
+            return 1 - Math.pow(1 - t, 3);
+        }
+        
+        function easeInCubic(t) {
+            return t * t * t;
+        }
+        
+        function lerp(start, end, t) {
+            return start + (end - start) * t;
+        }
+        
+        function updateCarPositionAndSize(centerX, centerY, width, height) {
+            if (!carContainer) return;
+            carContainer.style.width = `${width}px`;
+            carContainer.style.height = `${height}px`;
+            const left = centerX - width / 2;
+            const top = centerY - height / 2;
+            carContainer.style.left = `${left}px`;
+            carContainer.style.top = `${top}px`;
+            
+            if (width <= MIN_WIDTH + 8) {
+                sizeHintSpan.innerText = '小';
+                sizeHintSpan.style.color = '#aaffdd';
+            } else if (width >= MAX_WIDTH - 15) {
+                sizeHintSpan.innerText = '最大';
+                sizeHintSpan.style.color = '#ffaa66';
+            } else {
+                sizeHintSpan.innerText = '中';
+                sizeHintSpan.style.color = '#ddcc88';
+            }
+        }
+        
+        function recomputeKeyPoints() {
+            viewWidth = window.innerWidth;
+            viewHeight = window.innerHeight;
+            
+            const startW = MIN_WIDTH;
+            const startH = MIN_WIDTH / carAspect;
+            startCenter = { x: startW / 2, y: startH / 2 };
+            
+            midCenter = { x: viewWidth / 2, y: viewHeight / 2 };
+            
+            const endW = MIN_WIDTH;
+            const endH = MIN_WIDTH / carAspect;
+            endCenter = { x: viewWidth - endW / 2, y: viewHeight - endH / 2 };
+        }
+        
+        function updateCarByGlobalTime(nowTime, animStart) {
+            const elapsed = nowTime - animStart;
+            const totalDuration = DURATION_DECEL + PAUSE_TIME + DURATION_ACCEL;
+            
+            if (elapsed >= totalDuration) {
+                const finalW = MIN_WIDTH;
+                const finalH = MIN_WIDTH / carAspect;
+                curWidth = finalW;
+                curHeight = finalH;
+                updateCarPositionAndSize(endCenter.x, endCenter.y, finalW, finalH);
+                return true;
+            }
+            
+            // 阶段1: 减速 (左上→中央)
+            if (elapsed < DURATION_DECEL) {
+                const t = elapsed / DURATION_DECEL;
+                const easedT = easeOutCubic(t);
+                const centerX = lerp(startCenter.x, midCenter.x, easedT);
+                const centerY = lerp(startCenter.y, midCenter.y, easedT);
+                const widthVal = lerp(MIN_WIDTH, MAX_WIDTH, easedT);
+                const heightVal = widthVal / carAspect;
+                curWidth = widthVal;
+                curHeight = heightVal;
+                updateCarPositionAndSize(centerX, centerY, widthVal, heightVal);
+                return false;
+            }
+            // 阶段2: 停留 (中央，最大尺寸)
+            else if (elapsed < DURATION_DECEL + PAUSE_TIME) {
+                const maxW = MAX_WIDTH;
+                const maxH = MAX_WIDTH / carAspect;
+                curWidth = maxW;
+                curHeight = maxH;
+                updateCarPositionAndSize(midCenter.x, midCenter.y, maxW, maxH);
+                return false;
+            }
+            // 阶段3: 加速 (中央→右下)
+            else {
+                const accelElapsed = elapsed - (DURATION_DECEL + PAUSE_TIME);
+                let t = accelElapsed / DURATION_ACCEL;
+                if (t > 1) t = 1;
+                const easedT = easeInCubic(t);
+                const centerX = lerp(midCenter.x, endCenter.x, easedT);
+                const centerY = lerp(midCenter.y, endCenter.y, easedT);
+                const widthVal = lerp(MAX_WIDTH, MIN_WIDTH, easedT);
+                const heightVal = widthVal / carAspect;
+                curWidth = widthVal;
+                curHeight = heightVal;
+                updateCarPositionAndSize(centerX, centerY, widthVal, heightVal);
+                return false;
+            }
+        }
+        
+        function startAnimationLoop() {
+            if (animFrameId) cancelAnimationFrame(animFrameId);
+            if (!carContainer || !carImgElement) return;
+            
+            recomputeKeyPoints();
+            
+            const startW = MIN_WIDTH;
+            const startH = MIN_WIDTH / carAspect;
+            curWidth = startW;
+            curHeight = startH;
+            updateCarPositionAndSize(startCenter.x, startCenter.y, startW, startH);
+            
+            animStartTime = performance.now();
+            isAnimating = true;
+            
+            function animateFrame(now) {
+                if (!isAnimating) return;
+                const finished = updateCarByGlobalTime(now, animStartTime);
+                if (finished) {
+                    cancelAnimationFrame(animFrameId);
+                    animFrameId = null;
+                    isAnimating = false;
+                    sizeHintSpan.innerText = '终点';
+                    sizeHintSpan.style.color = '#88ffaa';
+                } else {
+                    animFrameId = requestAnimationFrame(animateFrame);
+                }
+            }
+            
+            animFrameId = requestAnimationFrame(animateFrame);
+        }
+        
+        function resetAndRestartAnimation() {
+            if (!carImgElement || !carAspect) return;
+            if (animFrameId) cancelAnimationFrame(animFrameId);
+            isAnimating = false;
+            recomputeKeyPoints();
+            startAnimationLoop();
+        }
+        
+        // 抠图处理 (将背景转为透明)
+        async function removeBackgroundAndGetImage(imgElement) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const width = imgElement.naturalWidth;
+            const height = imgElement.naturalHeight;
+            canvas.width = width;
+            canvas.height = height;
+            
+            ctx.drawImage(imgElement, 0, 0, width, height);
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            
+            // 采样四角颜色作为背景参考
+            const topLeft = [data[0], data[1], data[2]];
+            const topRightIdx = (width - 1) * 4;
+            const topRight = [data[topRightIdx], data[topRightIdx+1], data[topRightIdx+2]];
+            const bottomLeftIdx = (height - 1) * width * 4;
+            const bottomLeft = [data[bottomLeftIdx], data[bottomLeftIdx+1], data[bottomLeftIdx+2]];
+            const bottomRightIdx = (height - 1) * width * 4 + (width - 1) * 4;
+            const bottomRight = [data[bottomRightIdx], data[bottomRightIdx+1], data[bottomRightIdx+2]];
+            
+            // 平均背景色
+            const bgR = (topLeft[0] + topRight[0] + bottomLeft[0] + bottomRight[0]) / 4;
+            const bgG = (topLeft[1] + topRight[1] + bottomLeft[1] + bottomRight[1]) / 4;
+            const bgB = (topLeft[2] + topRight[2] + bottomLeft[2] + bottomRight[2]) / 4;
+            
+            for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i+1];
+                const b = data[i+2];
+                const diff = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
+                if (diff < BG_REMOVE_THRESHOLD) {
+                    data[i+3] = 0;   // 透明
+                } else {
+                    if (data[i+3] < 200) data[i+3] = 255;
+                }
+            }
+            ctx.putImageData(imageData, 0, 0);
+            
+            return new Promise((resolve) => {
+                canvas.toBlob((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    resolve(url);
+                }, 'image/png');
+            });
+        }
+        
+        async function loadAndProcessCar() {
+            try {
+                const response = await fetch(CAR_URL, { mode: 'cors' });
+                if (!response.ok) throw new Error(`图片加载失败: ${response.status}`);
+                const blob = await response.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                
+                const tempImg = new Image();
+                tempImg.crossOrigin = "Anonymous";
+                await new Promise((resolve, reject) => {
+                    tempImg.onload = () => resolve();
+                    tempImg.onerror = () => reject(new Error("临时图片加载失败"));
+                    tempImg.src = objectUrl;
+                });
+                
+                // 更新宽高比
+                carAspect = tempImg.naturalWidth / tempImg.naturalHeight;
+                
+                // 抠图处理
+                const processedUrl = await removeBackgroundAndGetImage(tempImg);
+                URL.revokeObjectURL(objectUrl);
+                
+                // 替换汽车图片
+                if (carImgElement) carImgElement.remove();
+                const newCarImg = document.createElement('img');
+                newCarImg.src = processedUrl;
+                newCarImg.alt = "抠图小汽车";
+                newCarImg.style.width = "100%";
+                newCarImg.style.height = "100%";
+                newCarImg.style.objectFit = "contain";
+                carContainer.innerHTML = '';
+                carContainer.appendChild(newCarImg);
+                carImgElement = newCarImg;
+                
+                if (newCarImg.complete) {
+                    initAnimationAfterReady();
+                } else {
+                    newCarImg.onload = () => initAnimationAfterReady();
+                }
+            } catch (error) {
+                console.error("处理汽车图片失败，使用原图降级: ", error);
+                // 降级：直接使用原图（带背景）
+                const fallbackImg = document.createElement('img');
+                fallbackImg.src = CAR_URL;
+                fallbackImg.alt = "小汽车";
+                fallbackImg.style.width = "100%";
+                fallbackImg.style.height = "100%";
+                fallbackImg.style.objectFit = "contain";
+                carContainer.innerHTML = '';
+                carContainer.appendChild(fallbackImg);
+                carImgElement = fallbackImg;
+                // 估算宽高比（避免完全错位）
+                if (fallbackImg.naturalWidth && fallbackImg.naturalHeight) {
+                    carAspect = fallbackImg.naturalWidth / fallbackImg.naturalHeight;
+                } else {
+                    carAspect = 1.3;
+                }
+                const note = document.createElement('div');
+                note.textContent = "⚠️ 背景抠图受限，但动画正常进行";
+                note.style.position = "absolute";
+                note.style.bottom = "40px";
+                note.style.left = "20px";
+                note.style.background = "#000000aa";
+                note.style.color = "#ffaa77";
+                note.style.padding = "4px 10px";
+                note.style.borderRadius = "20px";
+                note.style.fontSize = "12px";
+                note.style.zIndex = 999;
+                stage.appendChild(note);
+                setTimeout(() => note.remove(), 4000);
+                initAnimationAfterReady();
+            }
+        }
+        
+        function initAnimationAfterReady() {
+            if (!carImgElement) return;
+            // 确保宽高比有效
+            if (carImgElement.naturalWidth && carImgElement.naturalHeight) {
+                carAspect = carImgElement.naturalWidth / carImgElement.naturalHeight;
+            }
+            if (isNaN(carAspect) || carAspect <= 0) carAspect = 1.2;
+            
+            recomputeKeyPoints();
+            const startW = MIN_WIDTH;
+            const startH = MIN_WIDTH / carAspect;
+            curWidth = startW;
+            curHeight = startH;
+            updateCarPositionAndSize(startCenter.x, startCenter.y, startW, startH);
+            startAnimationLoop();
+        }
+        
+        // 窗口大小改变时重置动画
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            if (resizeTimer) clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                if (!carAspect) return;
+                recomputeKeyPoints();
+                if (animFrameId) {
+                    cancelAnimationFrame(animFrameId);
+                    animFrameId = null;
+                }
+                isAnimating = false;
+                startAnimationLoop();
+            }, 120);
+        });
+        
+        loadAndProcessCar();
+        
+        // 防止移动端拖动页面干扰
+        stage.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+        }, { passive: false });
+    })();
+</script>
+</body>
+</html>
